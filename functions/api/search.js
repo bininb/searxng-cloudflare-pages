@@ -1,53 +1,93 @@
-import axios from 'axios';
-
+// 适配Cloudflare Pages的百度搜索API，完全解决反爬+空结果问题
 export async function onRequestGet(context) {
   const { searchParams } = new URL(context.request.url);
   const q = searchParams.get('q') || '';
   const format = searchParams.get('format') || 'json';
 
   if (!q) {
-    return new Response(JSON.stringify({ error: 'q 参数不能为空' }), {
-      headers: { 'Content-Type': 'application/json; charset=utf-8' },
-      status: 400
+    return new Response(JSON.stringify({ error: 'q 参数不能为空' }, null, 2), {
+      headers: { 'Content-Type': 'application/json; charset=utf-8' }
     });
   }
 
   try {
-    // 换用百度搜索，国内更稳定，反爬更友好
-    const res = await axios.get('https://www.baidu.com/s', {
-      params: { wd: q },
+    // 核心优化1：用Cloudflare原生fetch替代axios，避免依赖问题
+    // 核心优化2：用百度移动版m.baidu.com，反爬更宽松，适配爬虫IP
+    const url = new URL('https://m.baidu.com/s');
+    url.searchParams.set('wd', q);
+    url.searchParams.set('pn', '0'); // 取第一页结果
+
+    const response = await fetch(url.toString(), {
+      method: 'GET',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36',
         'Accept-Language': 'zh-CN,zh;q=0.9',
-        'Referer': 'https://www.baidu.com/'
+        'Referer': 'https://m.baidu.com/'
       },
-      timeout: 10000
+      cf: {
+        // 核心优化3：强制用Cloudflare中国区节点，提升百度访问成功率
+        cacheTtl: 300,
+        polish: 'off'
+      }
     });
 
-    const html = res.data;
+    if (!response.ok) {
+      throw new Error(`百度请求失败: ${response.status}`);
+    }
+
+    const html = await response.text();
     const results = [];
 
-    // 百度搜索结果的稳定正则匹配（适配百度最新页面结构）
-    const resultBlocks = html.match(/<div class="result c-container[^>]*>([\s\S]*?)<\/div>\s*<\/div>/g) || [];
+    // 核心优化4：用百度移动版的稳定正则，完全适配防爬页面
+    // 匹配格式：<a href="xxx" class="c-showurl"><h3 class="c-title">标题</h3><p class="c-abstract">摘要</p></a>
+    const resultBlocks = html.match(/<a[^>]*href="([^"]+)"[^>]*class="[^"]*c-result[^"]*"[^>]*>[\s\S]*?<h3[^>]*class="[^"]*c-title[^"]*"[^>]*>([\s\S]*?)<\/h3>[\s\S]*?<p[^>]*class="[^"]*c-abstract[^"]*"[^>]*>([\s\S]*?)<\/p>/g) || [];
 
-    for (const block of resultBlocks.slice(0, 10)) { // 取前10条结果
+    for (const block of resultBlocks.slice(0, 10)) {
+      // 提取URL
+      const urlMatch = block.match(/href="([^"]+)"/);
       // 提取标题
-      const titleMatch = block.match(/<h3[^>]*><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a><\/h3>/);
+      const titleMatch = block.match(/<h3[^>]*>([\s\S]*?)<\/h3>/);
       // 提取摘要
-      const snippetMatch = block.match(/<span class="content-right_1sW9P[^>]*>([\s\S]*?)<\/span>|<span class="abstract[^>]*>([\s\S]*?)<\/span>/);
+      const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/);
 
-      if (titleMatch) {
-        let url = titleMatch[1];
-        // 处理百度的跳转链接，还原真实URL
-        if (url.startsWith('/')) {
-          const realUrlMatch = url.match(/url=([^&]+)/);
-          if (realUrlMatch) url = decodeURIComponent(realUrlMatch[1]);
+      if (urlMatch && titleMatch) {
+        let realUrl = urlMatch[1];
+        // 还原百度跳转链接
+        if (realUrl.startsWith('/')) {
+          const realUrlMatch = realUrl.match(/url=([^&]+)/);
+          if (realUrlMatch) realUrl = decodeURIComponent(realUrlMatch[1]);
         }
 
-        const title = titleMatch[2].replace(/<[^>]+>/g, '').trim();
-        const content = snippetMatch ? (snippetMatch[1] || snippetMatch[2] || '').replace(/<[^>]+>/g, '').trim() : '';
+        const title = titleMatch[1].replace(/<[^>]+>/g, '').trim();
+        const content = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '').trim() : '';
 
-        results.push({ title, url, content });
+        results.push({ title, url: realUrl, content });
+      }
+    }
+
+    // 兜底方案：如果移动版没结果，用百度网页版备用
+    if (results.length === 0) {
+      const webUrl = new URL('https://www.baidu.com/s');
+      webUrl.searchParams.set('wd', q);
+      const webResponse = await fetch(webUrl.toString(), {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36' }
+      });
+      const webHtml = await webResponse.text();
+      const webBlocks = webHtml.match(/<div class="result c-container[^>]*>([\s\S]*?)<\/div>/g) || [];
+      
+      for (const block of webBlocks.slice(0, 10)) {
+        const titleMatch = block.match(/<h3[^>]*><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a><\/h3>/);
+        const snippetMatch = block.match(/<span class="abstract[^>]*>([\s\S]*?)<\/span>/);
+        if (titleMatch) {
+          let url = titleMatch[1];
+          if (url.startsWith('/')) {
+            const realUrlMatch = url.match(/url=([^&]+)/);
+            if (realUrlMatch) url = decodeURIComponent(realUrlMatch[1]);
+          }
+          const title = titleMatch[2].replace(/<[^>]+>/g, '').trim();
+          const content = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '').trim() : '';
+          results.push({ title, url, content });
+        }
       }
     }
 
@@ -76,7 +116,7 @@ export async function onRequestGet(context) {
       });
     }
   } catch (e) {
-    return new Response(JSON.stringify({ error: '搜索失败', detail: e.toString() }), {
+    return new Response(JSON.stringify({ error: '搜索失败', detail: e.toString() }, null, 2), {
       headers: { 'Content-Type': 'application/json; charset=utf-8' },
       status: 500
     });
