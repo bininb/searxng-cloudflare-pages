@@ -1,4 +1,4 @@
-// 🔥 终极胜利版：使用 DuckDuckGo (DDG)，完全解决反爬问题
+// 🔥 最终完美版：DuckDuckGo 搜索，完整解析+格式化
 export async function onRequestGet(context) {
   const { searchParams } = new URL(context.request.url);
   const q = searchParams.get('q') || '';
@@ -21,34 +21,49 @@ export async function onRequestGet(context) {
     const data = await res.json();
     const results = [];
 
-    // 解析 DDG 的标准 JSON 结果
+    // 🔧 修复：正确解析标题和摘要
     if (data.RelatedTopics && Array.isArray(data.RelatedTopics)) {
-      for (const item of data.RelatedTopics.slice(0, 8)) {
-        // 处理两种结果格式：带URL的和带Text的
-        if (item.FirstURL) {
+      for (const item of data.RelatedTopics.slice(0, 10)) {
+        if (item.FirstURL && item.Text) {
+          // 用 " - " 分割标题和摘要，适配DDG的返回格式
+          const splitIndex = item.Text.indexOf(' - ');
+          let title, content;
+          
+          if (splitIndex !== -1) {
+            title = item.Text.slice(0, splitIndex).trim();
+            content = item.Text.slice(splitIndex + 3).trim();
+          } else {
+            // 没有分割符时，直接用全文当标题，摘要留空
+            title = item.Text.trim();
+            content = "无详细摘要";
+          }
+
           results.push({
-            title: item.Text.split(' - ')[0] || item.Text, // 提取标题
+            title: title,
             url: item.FirstURL,
-            content: item.Text.split(' - ').slice(1).join(' - ') || 'No description' // 提取摘要
+            content: content
           });
         }
       }
     }
 
-    // 如果DDG没结果，尝试用Bing备用（仅作为兜底）
+    // 兜底：如果没结果，给提示
     if (results.length === 0) {
        results.push({
          title: "暂无搜索结果",
-         url: "https://duckduckgo.com/?q=" + encodeURIComponent(q),
+         url: `https://duckduckgo.com/?q=${encodeURIComponent(q)}`,
          content: "请尝试更换关键词或直接访问 DuckDuckGo 查看详情。"
        });
     }
 
     if (format === 'json') {
-      return Response.json({ query: q, results });
+      // ✅ 格式化JSON，让结果清晰可读
+      return new Response(JSON.stringify({ query: q, results }, null, 2), {
+        headers: { "Content-Type": "application/json; charset=utf-8" }
+      });
     }
 
-    // 网页端展示
+    // 网页端展示优化
     return new Response(`
       <html><head><meta charset="UTF-8"><title>搜索结果: ${q}</title></head><body>
         <h1>搜索结果 (DuckDuckGo)</h1>
