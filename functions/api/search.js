@@ -1,15 +1,25 @@
-// 🔥 最终完美版：DuckDuckGo 搜索，完整解析+格式化
+// 🔥 最终完美版：标准 SearXNG API 格式，完美适配 OpenClaw
 export async function onRequestGet(context) {
   const { searchParams } = new URL(context.request.url);
   const q = searchParams.get('q') || '';
   const format = searchParams.get('format') || 'json';
 
+  // 🔧 标准 SearXNG API 必须支持的参数
+  const count = parseInt(searchParams.get('count') || '10', 10);
+
   if (!q) {
-    return Response.json({ error: "请输入搜索关键词" }, { status: 400 });
+    return Response.json({
+      query: q,
+      number_of_results: 0,
+      results: [],
+      answers: [],
+      infoboxes: [],
+      suggestions: []
+    });
   }
 
   try {
-    // DuckDuckGo 搜索 API (完全无反爬，Cloudflare 100% 通)
+    // DuckDuckGo 搜索 API
     const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(q)}&format=json&no_html=1&skip_disambig=1`;
 
     const res = await fetch(ddgUrl, {
@@ -21,11 +31,10 @@ export async function onRequestGet(context) {
     const data = await res.json();
     const results = [];
 
-    // 🔧 修复：正确解析标题和摘要
+    // 解析 DDG 结果，适配标准 SearXNG 格式
     if (data.RelatedTopics && Array.isArray(data.RelatedTopics)) {
-      for (const item of data.RelatedTopics.slice(0, 10)) {
+      for (const item of data.RelatedTopics.slice(0, count)) {
         if (item.FirstURL && item.Text) {
-          // 用 " - " 分割标题和摘要，适配DDG的返回格式
           const splitIndex = item.Text.indexOf(' - ');
           let title, content;
           
@@ -33,37 +42,39 @@ export async function onRequestGet(context) {
             title = item.Text.slice(0, splitIndex).trim();
             content = item.Text.slice(splitIndex + 3).trim();
           } else {
-            // 没有分割符时，直接用全文当标题，摘要留空
             title = item.Text.trim();
             content = "无详细摘要";
           }
 
+          // 🔧 标准 SearXNG 结果字段
           results.push({
             title: title,
             url: item.FirstURL,
-            content: content
+            content: content,
+            engine: "duckduckgo",
+            category: "general"
           });
         }
       }
     }
 
-    // 兜底：如果没结果，给提示
-    if (results.length === 0) {
-       results.push({
-         title: "暂无搜索结果",
-         url: `https://duckduckgo.com/?q=${encodeURIComponent(q)}`,
-         content: "请尝试更换关键词或直接访问 DuckDuckGo 查看详情。"
-       });
-    }
+    // 🔧 标准 SearXNG API 响应格式（OpenClaw 原生支持）
+    const response = {
+      query: q,
+      number_of_results: results.length,
+      results: results,
+      answers: [],
+      infoboxes: data.Infobox ? [data.Infobox] : [],
+      suggestions: data.RelatedTopics ? data.RelatedTopics.map(t => t.Text.split(' - ')[0]).slice(0, 5) : []
+    };
 
     if (format === 'json') {
-      // ✅ 格式化JSON，让结果清晰可读
-      return new Response(JSON.stringify({ query: q, results }, null, 2), {
+      return new Response(JSON.stringify(response, null, 2), {
         headers: { "Content-Type": "application/json; charset=utf-8" }
       });
     }
 
-    // 网页端展示优化
+    // 网页端展示
     return new Response(`
       <html><head><meta charset="UTF-8"><title>搜索结果: ${q}</title></head><body>
         <h1>搜索结果 (DuckDuckGo)</h1>
