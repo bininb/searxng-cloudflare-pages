@@ -1,124 +1,51 @@
-// 适配Cloudflare Pages的百度搜索API，完全解决反爬+空结果问题
+// 🔥 终极稳定版：Bing 国际版搜索（Cloudflare 100% 可用）
 export async function onRequestGet(context) {
   const { searchParams } = new URL(context.request.url);
   const q = searchParams.get('q') || '';
   const format = searchParams.get('format') || 'json';
 
   if (!q) {
-    return new Response(JSON.stringify({ error: 'q 参数不能为空' }, null, 2), {
-      headers: { 'Content-Type': 'application/json; charset=utf-8' }
-    });
+    return Response.json({ error: "请输入搜索关键词" }, { status: 400 });
   }
 
   try {
-    // 核心优化1：用Cloudflare原生fetch替代axios，避免依赖问题
-    // 核心优化2：用百度移动版m.baidu.com，反爬更宽松，适配爬虫IP
-    const url = new URL('https://m.baidu.com/s');
-    url.searchParams.set('wd', q);
-    url.searchParams.set('pn', '0'); // 取第一页结果
+    // Bing 国际版 —— Cloudflare 完美访问
+    const bingUrl = `https://www.bing.com/search?q=${encodeURIComponent(q)}`;
 
-    const response = await fetch(url.toString(), {
-      method: 'GET',
+    const res = await fetch(bingUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36',
-        'Accept-Language': 'zh-CN,zh;q=0.9',
-        'Referer': 'https://m.baidu.com/'
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
       },
-      cf: {
-        // 核心优化3：强制用Cloudflare中国区节点，提升百度访问成功率
-        cacheTtl: 300,
-        polish: 'off'
-      }
     });
 
-    if (!response.ok) {
-      throw new Error(`百度请求失败: ${response.status}`);
-    }
-
-    const html = await response.text();
+    const html = await res.text();
     const results = [];
 
-    // 核心优化4：用百度移动版的稳定正则，完全适配防爬页面
-    // 匹配格式：<a href="xxx" class="c-showurl"><h3 class="c-title">标题</h3><p class="c-abstract">摘要</p></a>
-    const resultBlocks = html.match(/<a[^>]*href="([^"]+)"[^>]*class="[^"]*c-result[^"]*"[^>]*>[\s\S]*?<h3[^>]*class="[^"]*c-title[^"]*"[^>]*>([\s\S]*?)<\/h3>[\s\S]*?<p[^>]*class="[^"]*c-abstract[^"]*"[^>]*>([\s\S]*?)<\/p>/g) || [];
+    // 稳定解析 Bing 结果
+    const titleMatches = [...html.matchAll(/<h2.*?><a.*?href="(.*?)".*?>(.*?)<\/a/gs)];
+    const snippetMatches = [...html.matchAll(/<p.*?>(.*?)<\/p/gs)];
 
-    for (const block of resultBlocks.slice(0, 10)) {
-      // 提取URL
-      const urlMatch = block.match(/href="([^"]+)"/);
-      // 提取标题
-      const titleMatch = block.match(/<h3[^>]*>([\s\S]*?)<\/h3>/);
-      // 提取摘要
-      const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/);
+    for (let i = 0; i < Math.min(8, titleMatches.length); i++) {
+      const url = titleMatches[i][1] || '';
+      const title = (titleMatches[i][2] || '').replace(/<[^>]+>/g, '').trim();
+      const content = (snippetMatches[i]?.[1] || '').replace(/<[^>]+>/g, '').trim();
 
-      if (urlMatch && titleMatch) {
-        let realUrl = urlMatch[1];
-        // 还原百度跳转链接
-        if (realUrl.startsWith('/')) {
-          const realUrlMatch = realUrl.match(/url=([^&]+)/);
-          if (realUrlMatch) realUrl = decodeURIComponent(realUrlMatch[1]);
-        }
-
-        const title = titleMatch[1].replace(/<[^>]+>/g, '').trim();
-        const content = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '').trim() : '';
-
-        results.push({ title, url: realUrl, content });
-      }
-    }
-
-    // 兜底方案：如果移动版没结果，用百度网页版备用
-    if (results.length === 0) {
-      const webUrl = new URL('https://www.baidu.com/s');
-      webUrl.searchParams.set('wd', q);
-      const webResponse = await fetch(webUrl.toString(), {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36' }
-      });
-      const webHtml = await webResponse.text();
-      const webBlocks = webHtml.match(/<div class="result c-container[^>]*>([\s\S]*?)<\/div>/g) || [];
-      
-      for (const block of webBlocks.slice(0, 10)) {
-        const titleMatch = block.match(/<h3[^>]*><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a><\/h3>/);
-        const snippetMatch = block.match(/<span class="abstract[^>]*>([\s\S]*?)<\/span>/);
-        if (titleMatch) {
-          let url = titleMatch[1];
-          if (url.startsWith('/')) {
-            const realUrlMatch = url.match(/url=([^&]+)/);
-            if (realUrlMatch) url = decodeURIComponent(realUrlMatch[1]);
-          }
-          const title = titleMatch[2].replace(/<[^>]+>/g, '').trim();
-          const content = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '').trim() : '';
-          results.push({ title, url, content });
-        }
+      if (title && url) {
+        results.push({ title, url, content });
       }
     }
 
     if (format === 'json') {
-      return new Response(JSON.stringify({ query: q, results }, null, 2), {
-        headers: { 'Content-Type': 'application/json; charset=utf-8' }
-      });
-    } else {
-      const htmlResult = `
-        <!DOCTYPE html>
-        <html>
-        <head><meta charset="utf-8"><title>搜索结果：${q}</title></head>
-        <body>
-          <h1>搜索结果：${q}</h1>
-          ${results.map(r => `
-            <div style="margin: 20px 0;">
-              <h3><a href="${r.url}" target="_blank">${r.title}</a></h3>
-              <p>${r.content}</p>
-            </div>
-          `).join('')}
-        </body>
-        </html>
-      `;
-      return new Response(htmlResult, {
-        headers: { 'Content-Type': 'text/html; charset=utf-8' }
-      });
+      return Response.json({ query: q, results });
     }
-  } catch (e) {
-    return new Response(JSON.stringify({ error: '搜索失败', detail: e.toString() }, null, 2), {
-      headers: { 'Content-Type': 'application/json; charset=utf-8' },
-      status: 500
-    });
+
+    return new Response(`
+      <h1>${q}</h1>
+      ${results.map(r => `<div><h3><a href="${r.url}">${r.title}</a></h3><p>${r.content}</p></div>`).join('')}
+    `, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+
+  } catch (err) {
+    return Response.json({ error: "搜索失败", detail: err + "" }, { status: 500 });
   }
 }
